@@ -1,0 +1,10 @@
+load-dotenv
+fastapi
+uvicorn
+mangum
+pydantic
+requests
+boto3
+PyJWT
+email_validator
+

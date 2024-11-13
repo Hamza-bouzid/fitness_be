@@ -1,0 +1,13 @@
+[tool.coverage.run]
+omit = [
+    "*/__init__.py",
+    "src/repositories/database/DBInterface.py",
+    "src/utility/api_responses.py",
+    "src/utility/api_message_responses.py",
+    "src/models/aws/SNSMessage.py"
+]
+
+[tool.coverage.report]
+exclude_also = [
+    'if __name__ == "__main__":',
+]

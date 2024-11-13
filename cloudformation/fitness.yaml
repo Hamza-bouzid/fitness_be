@@ -1,0 +1,205 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  EnvType:
+    Description: Specify the Environment type of the stack
+    Type: String
+    AllowedValues:
+      - staging
+      - prod
+    Default: staging
+    ConstraintDescription: Must be one of staging or prod
+
+
+Mappings:
+  Resources:
+    staging:
+      Name: Fitness-staging
+    prod:
+      Name: Fitness
+
+Conditions:
+  IsProd: !Equals [ !Ref EnvType, "prod" ]
+
+Resources:
+  # LAMBDA FUNCTION
+  FitnessLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      Description: ''
+      FunctionName: !FindInMap [ Resources, !Ref EnvType, Name ]
+      MemorySize: !If [ IsProd, 512, 250 ]
+      Timeout: 150
+      Handler: main.lambda_handler
+      Runtime: python3.13
+      InlineCode: |
+        def lambda_handler(event, context):
+            return {
+                "statusCode": 200
+                , "body": "Hello World"
+            }
+      Architectures:
+        - x86_64
+      EphemeralStorage:
+        Size: 512
+      Environment:
+        Variables:
+          S3_REGION: eu-south-1
+
+      EventInvokeConfig:
+        MaximumEventAgeInSeconds: 21600
+        MaximumRetryAttempts: 2
+      PackageType: Zip
+      SnapStart:
+        ApplyOn: None
+      Role: !GetAtt LambdaFunctionRole.Arn
+
+
+  LambdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        !Sub
+        - ${Name}-role
+        - Name: !FindInMap [ Resources, !Ref EnvType, Name ]
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+#  # DYNAMO TABLES
+#  BaboopBeV2ConfigTable:
+#    #DeletionPolicy: Retain
+#    Type: AWS::DynamoDB::Table
+#    Properties:
+#      TableName: !If [ IsProd, BaboopBeV2_Config, BaboopBeV2_Config-staging ]
+#      AttributeDefinitions:
+#        - AttributeName: key_name
+#          AttributeType: S
+#      KeySchema:
+#        - AttributeName: key_name
+#          KeyType: HASH
+#      BillingMode: PAY_PER_REQUEST
+#      PointInTimeRecoverySpecification:
+#        PointInTimeRecoveryEnabled: true
+#      DeletionProtectionEnabled: !If [ IsProd, true, false ]
+#      Tags:
+#        - Key: BaboopBeV2
+#          Value: !Ref EnvType
+
+  #API GATEWAY REST API
+  ApiGatewayRestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name:
+        !Sub
+        - ${Name}-API
+        - Name: !FindInMap [ Resources, !Ref EnvType, Name ]
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  ApiGatewayResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ParentId: !GetAtt ApiGatewayRestApi.RootResourceId
+      PathPart: "{proxy+}"
+
+  ApiGatewayMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ResourceId: !Ref ApiGatewayResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri:
+          !If
+          - IsProd
+          - !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FitnessLambda.Arn}:${!stageVariables.version}/invocations"
+          - !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FitnessLambda.Arn}/invocations"
+      RequestParameters:
+        method.request.path.proxy: true
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: "Empty"
+
+  ApiGatewayOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      ResourceId: !Ref ApiGatewayResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Methods: "'DELETE,GET,HEAD,OPTIONS,PATCH,POST,PUT'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,API-Key'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        PassthroughBehavior: WHEN_NO_MATCH
+        RequestTemplates:
+          application/json: "{\"statusCode\": 200}"
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Expose-Headers: true
+          ResponseModels:
+            application/json: Empty
+
+  #API GATEWAY STAGES
+  ApiGatewayDefaultStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      StageName: default
+      DeploymentId: !Ref ApiGatewayDeployment
+      Variables:
+        app_name: !FindInMap [ Resources, !Ref EnvType, Name ]
+        cors_allow_headers: Accept,Accept-Language,Content-Language,Content-Type,accept,accept-encoding,content-type,origin,user-agent,API-Key
+        cors_allow_methods: GET,POST,DELETE,PATCH,OPTIONS
+        cors_allow_origins:
+          !If
+          - IsProd
+          - "none"
+          - "all"
+        docs_url: !If [ IsProd, '', "/docs" ]
+        redoc_url: !If [ IsProd,'', "/redoc" ]
+        version: !If [ IsProd, "prod", "staging" ]
+      MethodSettings:
+        - HttpMethod: "*"
+          ResourcePath: "/*"
+          ThrottlingBurstLimit: 2500
+          ThrottlingRateLimit: 1250
+
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: ApiGatewayMethod
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+
+
+  #LAMBDA PERMISSIONS
+  ApiGatewayInvokeLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt FitnessLambda.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayRestApi}/*/*/*'
+
